@@ -1,0 +1,31 @@
+{
+  "name": "els-addon-qunit-test-runner",
+  "version": "1.0.0",
+  "main": "index.js",
+  "repository": "https://github.com/lifeart/els-addon-qunit-test-runner.git",
+  "author": "Aleksandr Kanunnikov <lifeart92@gmail.com>",
+  "license": "MIT",
+  "private": false,
+  "dependencies": {
+    "@babel/traverse": "^7.12.12",
+    "ember-meta-explorer": "^0.2.1",
+    "playwright": "^1.7.1",
+    "vscode-uri": "^3.0.2"
+  },
+  "scripts": {
+    "build": "npx swc ./index.ts -o index.js"
+  },
+  "ember-language-server": {
+    "entry": "./index",
+    "debug": false,
+    "capabilities": {
+      "completionProvider": true,
+      "definitionProvider": true
+    }
+  },
+  "devDependencies": {
+    "@lifeart/ember-language-server": "^1.0.1",
+    "@swc/cli": "^0.1.32",
+    "@swc/core": "^1.2.45"
+  }
+}
