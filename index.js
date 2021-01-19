@@ -1,36 +1,24 @@
 "use strict";
+var _node = require("vscode-languageserver/node");
 var _playwright = require("playwright");
 var _vscodeUri = require("vscode-uri");
 var _emberMetaExplorer = require("ember-meta-explorer");
-var fs = _interopRequireWildcard(require("fs"));
 var _traverse = _interopRequireDefault(require("@babel/traverse"));
 function _interopRequireDefault(obj) {
     return obj && obj.__esModule ? obj : {
         default: obj
     };
 }
-function _interopRequireWildcard(obj) {
-    if (obj && obj.__esModule) {
-        return obj;
-    } else {
-        var newObj = {
-        };
-        if (obj != null) {
-            for(var key in obj){
-                if (Object.prototype.hasOwnProperty.call(obj, key)) {
-                    var desc = Object.defineProperty && Object.getOwnPropertyDescriptor ? Object.getOwnPropertyDescriptor(obj, key) : {
-                    };
-                    if (desc.get || desc.set) {
-                        Object.defineProperty(newObj, key, desc);
-                    } else {
-                        newObj[key] = obj[key];
-                    }
-                }
-            }
-        }
-        newObj.default = obj;
-        return newObj;
-    }
+function toDiagnostic(location, data) {
+    const start = _node.Position.create(location.start.line - 1, location.start.column);
+    const end = _node.Position.create(location.end.line - 1, location.end.column);
+    return {
+        severity: data.result ? _node.DiagnosticSeverity.Hint : _node.DiagnosticSeverity.Error,
+        range: _node.Range.create(start, end),
+        message: data.message,
+        code: 'qunit-test',
+        source: 'qunit'
+    };
 }
 function generateHash(module, testName) {
     let str = module + "\x1C" + testName;
@@ -49,50 +37,85 @@ function generateHash(module, testName) {
 module.exports = (function() {
     class ElsAddonQunitTestRunner {
         async initBrowser() {
-            const browser = await _playwright.chromium.launch({
-                devtools: false,
-                headless: true,
-                timeout: 30 * 1000
-            });
-            const context = await browser.newContext();
-            this.browser = browser;
-            this.context = context;
+            if (!this.initPromise) {
+                this.initPromise = new Promise(async (resolve)=>{
+                    const browser = await _playwright.chromium.launch({
+                        devtools: false,
+                        headless: true,
+                        timeout: 30 * 1000
+                    });
+                    const context = await browser.newContext();
+                    this.browser = browser;
+                    this.context = context;
+                    resolve(true);
+                });
+            }
+            await this.initPromise;
         }
         onInit(server, project) {
-            console.log('initialized');
-            this.initBrowser();
-            project.addWatcher((uri, changeType)=>{
-                console.log('uri', uri);
-                if (!this.browser) {
-                    console.log('no-browser');
-                    return;
-                }
-                if (changeType === 2) {
+            this.server = server;
+            // project.addWatcher((uri, changeType) => {
+            //   console.log('uri', uri);
+            //   if (!this.browser) {
+            //     console.log('no-browser');
+            //     return;
+            //   }
+            //   if (changeType === 2) {
+            //     const filePath = URI.parse(uri).fsPath;
+            //     if (project.matchPathToType(filePath)?.kind === 'test') {
+            //       this.getLinting(filePath);
+            //     }
+            //   }
+            // });
+            const lintFn = async (document)=>{
+                const asyncLint = async ()=>{
                     var ref;
-                    const filePath = _vscodeUri.URI.parse(uri).fsPath;
+                    await this.initBrowser();
+                    const filePath = _vscodeUri.URI.parse(document.uri).fsPath;
                     if (((ref = project.matchPathToType(filePath)) === null || ref === void 0 ? void 0 : ref.kind) === 'test') {
-                        this.getLinting(filePath);
+                        console.log('can lint');
+                        const results = await this.getLinting(document.getText());
+                        console.log('results', results);
+                        this.server.connection.sendDiagnostics({
+                            version: document.version,
+                            diagnostics: results,
+                            uri: document.uri
+                        });
                     }
-                }
-            });
+                };
+                asyncLint();
+            };
+            project.addLinter(lintFn);
             return ()=>{
                 this.pagePool.forEach((page)=>page.close()
                 );
-                this.browser.close();
+                if (this.browser) {
+                    this.browser.close();
+                }
             };
         }
-        async getLinting(filePath) {
-            console.log('getLinting', filePath);
-            const info = this.extractTestFileInformation(filePath);
-            console.log(info);
-            const results = await Promise.all(info.tests.map((el)=>{
-                return this.getTestResults(info.moduleName, el);
-            }));
-            console.log('results', results);
-            return results;
+        createDiagnostics(testsInfo, testsResults) {
+            const diagnostics = [];
+            testsResults.forEach((result)=>{
+                const relatedTest = testsInfo.tests.find((el)=>el.name === result.name
+                );
+                const relatedAsserts = relatedTest.asserts;
+                result.assertions.forEach((assert, index)=>{
+                    diagnostics.push(toDiagnostic(relatedAsserts[index], assert));
+                });
+            });
+            return diagnostics;
         }
-        extractTestFileInformation(filePath) {
-            const ast = _emberMetaExplorer.parseScriptFile(fs.readFileSync(filePath, "utf8"));
+        async getLinting(text) {
+            const info = this.extractTestFileInformation(text);
+            const results = await Promise.all(info.tests.map((el)=>{
+                return this.getTestResults(info.moduleName, el.name);
+            }));
+            const diagnostics = this.createDiagnostics(info, results);
+            return diagnostics;
+        }
+        extractTestFileInformation(text) {
+            const ast = _emberMetaExplorer.parseScriptFile(text);
             let moduleName = "";
             let foundTests = [];
             try {
@@ -103,8 +126,16 @@ module.exports = (function() {
                             if (node.expression.callee.name === "module") {
                                 moduleName = node.expression.arguments[0].value;
                             } else if (node.expression.callee.name === "test") {
-                                foundTests.push(node.expression.arguments[0].value);
+                                foundTests.push({
+                                    name: node.expression.arguments[0].value,
+                                    asserts: []
+                                });
                             }
+                        }
+                    },
+                    MemberExpression (path) {
+                        if (path.node.object.type === 'Identifier' && path.node.object.name === 'assert') {
+                            foundTests[foundTests.length - 1].asserts.push(path.node.object.loc);
                         }
                     }
                 });
@@ -117,10 +148,10 @@ module.exports = (function() {
             };
         }
         async getTestResults(moduleName, testName) {
-            console.log('getTestResults', moduleName, testName);
             const page = this.pagePool.shift() || await this.context.newPage();
             const testId = generateHash(moduleName, testName);
             const url = `http://localhost:4300/tests?testId=${testId}`;
+            console.time(testId);
             await page.goto(url, {
                 waitUntil: "load"
             });
@@ -132,16 +163,19 @@ module.exports = (function() {
             await page.waitForSelector(`#qunit-test-output-${testId} .runtime`, {
                 timeout: 30000
             });
-            const results = await page.evaluate(()=>window.__TEST_RESULTS
+            const result = await page.evaluate(()=>window.__TEST_RESULTS
             );
+            console.timeEnd(testId);
             try {
-                return results;
+                return result;
             } finally{
                 this.pagePool.push(page);
             }
         }
         constructor(){
             this.pagePool = [];
+            this.linterResults = {
+            };
         }
     }
     return ElsAddonQunitTestRunner;
