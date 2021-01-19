@@ -26,7 +26,7 @@ function generateHash(module, testName) {
   return hex.slice(-8);
 }
 
-export default class ElsAddonQunitTestRunner implements AddonAPI {
+module.exports = class ElsAddonQunitTestRunner implements AddonAPI {
   browser!: ChromiumBrowser;
   context!: ChromiumBrowserContext;
   async initBrowser() {

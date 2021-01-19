@@ -1,8 +1,4 @@
 "use strict";
-Object.defineProperty(exports, "__esModule", {
-    value: true
-});
-exports.default = void 0;
 var _playwright = require("playwright");
 var _vscodeUri = require("vscode-uri");
 var _emberMetaExplorer = require("ember-meta-explorer");
@@ -45,86 +41,88 @@ function generateHash(module, testName) {
     }
     return hex.slice(-8);
 }
-class ElsAddonQunitTestRunner {
-    async initBrowser() {
-        const browser = await _playwright.chromium.launch({
-            devtools: false,
-            headless: true,
-            timeout: 30 * 1000
-        });
-        const context = await browser.newContext();
-        this.browser = browser;
-        this.context = context;
-    }
-    onInit(server, project) {
-        console.log('initialized');
-        this.initBrowser();
-        project.addWatcher((uri)=>{
-            console.log('uri', uri);
-            if (!this.browser) {
-                console.log('no-browser');
-                return;
-            }
-            this.getLinting(_vscodeUri.URI.parse(uri).fsPath);
-        });
-        return ()=>{
-            this.browser.close();
-        };
-    }
-    async getLinting(filePath) {
-        console.log('getLinting', filePath);
-        const info = this.extractTestFileInformation(filePath);
-        console.log(info);
-        const results = Promise.all(info.tests.map((el)=>{
-            return this.getTestResults(info.moduleName, el);
-        }));
-        console.log('results', results);
-        return results;
-    }
-    extractTestFileInformation(filePath) {
-        const ast = _emberMetaExplorer.parseScriptFile(fs.readFileSync(filePath, "utf8"));
-        let moduleName = "";
-        let foundTests = [];
-        traverse(ast, {
-            ExpressionStatement (node) {
-                if (node.expression.type === "CallExpression") {
-                    if (node.expression.callee.name === "module") {
-                        moduleName = node.expression.arguments[0].value;
-                    } else if (node.expression.callee.name === "test") {
-                        foundTests.push(node.expression.arguments[0].value);
+module.exports = (function() {
+    class ElsAddonQunitTestRunner {
+        async initBrowser() {
+            const browser = await _playwright.chromium.launch({
+                devtools: false,
+                headless: true,
+                timeout: 30 * 1000
+            });
+            const context = await browser.newContext();
+            this.browser = browser;
+            this.context = context;
+        }
+        onInit(server, project) {
+            console.log('initialized');
+            this.initBrowser();
+            project.addWatcher((uri)=>{
+                console.log('uri', uri);
+                if (!this.browser) {
+                    console.log('no-browser');
+                    return;
+                }
+                this.getLinting(_vscodeUri.URI.parse(uri).fsPath);
+            });
+            return ()=>{
+                this.browser.close();
+            };
+        }
+        async getLinting(filePath) {
+            console.log('getLinting', filePath);
+            const info = this.extractTestFileInformation(filePath);
+            console.log(info);
+            const results = Promise.all(info.tests.map((el)=>{
+                return this.getTestResults(info.moduleName, el);
+            }));
+            console.log('results', results);
+            return results;
+        }
+        extractTestFileInformation(filePath) {
+            const ast = _emberMetaExplorer.parseScriptFile(fs.readFileSync(filePath, "utf8"));
+            let moduleName = "";
+            let foundTests = [];
+            traverse(ast, {
+                ExpressionStatement (node) {
+                    if (node.expression.type === "CallExpression") {
+                        if (node.expression.callee.name === "module") {
+                            moduleName = node.expression.arguments[0].value;
+                        } else if (node.expression.callee.name === "test") {
+                            foundTests.push(node.expression.arguments[0].value);
+                        }
                     }
                 }
-            }
-        });
-        return {
-            moduleName,
-            tests: foundTests
-        };
-    }
-    async getTestResults(moduleName, testName) {
-        console.log('getTestResults', moduleName, testName);
-        const page = await this.context.newPage();
-        const testId = generateHash(moduleName, testName);
-        const url = `http://localhost:4300/tests?testId=${testId}`;
-        await page.goto(url, {
-            waitUntil: "load"
-        });
-        await page.evaluate(()=>{
-            QUnit.config.callbacks.testDone.push((results)=>{
-                window.__TEST_RESULTS = results;
             });
-        });
-        await page.waitForSelector(`#qunit-test-output-${testId} .runtime`, {
-            timeout: 30000
-        });
-        const results = await page.evaluate(()=>window.__TEST_RESULTS
-        );
-        try {
-            return results;
-        } finally{
-            page.close();
+            return {
+                moduleName,
+                tests: foundTests
+            };
+        }
+        async getTestResults(moduleName, testName) {
+            console.log('getTestResults', moduleName, testName);
+            const page = await this.context.newPage();
+            const testId = generateHash(moduleName, testName);
+            const url = `http://localhost:4300/tests?testId=${testId}`;
+            await page.goto(url, {
+                waitUntil: "load"
+            });
+            await page.evaluate(()=>{
+                QUnit.config.callbacks.testDone.push((results)=>{
+                    window.__TEST_RESULTS = results;
+                });
+            });
+            await page.waitForSelector(`#qunit-test-output-${testId} .runtime`, {
+                timeout: 30000
+            });
+            const results = await page.evaluate(()=>window.__TEST_RESULTS
+            );
+            try {
+                return results;
+            } finally{
+                page.close();
+            }
         }
     }
-}
-exports.default = ElsAddonQunitTestRunner;
+    return ElsAddonQunitTestRunner;
+})();
 
