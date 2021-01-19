@@ -1,11 +1,11 @@
 /* eslint-disable no-undef */
 /* globals QUnit */
 import type { Project, Server, AddonAPI } from "@lifeart/ember-language-server";
-import { chromium, ChromiumBrowser, ChromiumBrowserContext } from "playwright";
+import { chromium, ChromiumBrowser, ChromiumBrowserContext, Page } from "playwright";
 import { URI } from "vscode-uri";
 import { parseScriptFile } from "ember-meta-explorer";
 import * as fs from "fs";
-import * as traverse from "@babel/traverse";
+import traverse from "@babel/traverse";
 
 function generateHash(module, testName) {
   let str = module + "\x1C" + testName;
@@ -29,6 +29,7 @@ function generateHash(module, testName) {
 module.exports = class ElsAddonQunitTestRunner implements AddonAPI {
   browser!: ChromiumBrowser;
   context!: ChromiumBrowserContext;
+  pagePool: Page[] = [];
   async initBrowser() {
     const browser = await chromium.launch({
       devtools: false,
@@ -42,15 +43,21 @@ module.exports = class ElsAddonQunitTestRunner implements AddonAPI {
   onInit(server: Server, project: Project) {
     console.log('initialized');
     this.initBrowser();
-    project.addWatcher((uri) => {
+    project.addWatcher((uri, changeType) => {
       console.log('uri', uri);
       if (!this.browser) {
         console.log('no-browser');
         return;
       }
-      this.getLinting(URI.parse(uri).fsPath);
+      if (changeType === 2) {
+        const filePath = URI.parse(uri).fsPath;
+        if (project.matchPathToType(filePath)?.kind === 'test') {
+          this.getLinting(filePath);
+        }
+      }
     });
     return () => {
+      this.pagePool.forEach((page) => page.close());
       this.browser.close();
     };
   }
@@ -58,7 +65,7 @@ module.exports = class ElsAddonQunitTestRunner implements AddonAPI {
     console.log('getLinting', filePath);
     const info = this.extractTestFileInformation(filePath);
     console.log(info);
-    const results = Promise.all(
+    const results = await Promise.all(
       info.tests.map((el) => {
         return this.getTestResults(info.moduleName, el);
       })
@@ -70,17 +77,22 @@ module.exports = class ElsAddonQunitTestRunner implements AddonAPI {
     const ast = parseScriptFile(fs.readFileSync(filePath, "utf8"));
     let moduleName = "";
     let foundTests = [];
-    traverse(ast, {
-      ExpressionStatement(node) {
-        if (node.expression.type === "CallExpression") {
-          if (node.expression.callee.name === "module") {
-            moduleName = node.expression.arguments[0].value;
-          } else if (node.expression.callee.name === "test") {
-            foundTests.push(node.expression.arguments[0].value);
+    try {
+      traverse(ast, {
+        ExpressionStatement(nodePath) {
+          const node = nodePath.node;
+          if (node.expression.type === "CallExpression") {
+            if (node.expression.callee.name === "module") {
+              moduleName = node.expression.arguments[0].value;
+            } else if (node.expression.callee.name === "test") {
+              foundTests.push(node.expression.arguments[0].value);
+            }
           }
-        }
-      },
-    });
+        },
+      });
+    } catch (e) {
+      console.log(e);
+    }
     return {
       moduleName,
       tests: foundTests,
@@ -88,7 +100,7 @@ module.exports = class ElsAddonQunitTestRunner implements AddonAPI {
   }
   async getTestResults(moduleName, testName) {
     console.log('getTestResults', moduleName, testName);
-    const page = await this.context.newPage();
+    const page = this.pagePool.shift() || await this.context.newPage();
     const testId = generateHash(moduleName, testName);
     const url = `http://localhost:4300/tests?testId=${testId}`;
     await page.goto(url, {
@@ -106,7 +118,7 @@ module.exports = class ElsAddonQunitTestRunner implements AddonAPI {
     try {
       return results;
     } finally {
-      page.close();
+      this.pagePool.push(page);
     }
   }
 }

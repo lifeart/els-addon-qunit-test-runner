@@ -3,7 +3,12 @@ var _playwright = require("playwright");
 var _vscodeUri = require("vscode-uri");
 var _emberMetaExplorer = require("ember-meta-explorer");
 var fs = _interopRequireWildcard(require("fs"));
-var traverse = _interopRequireWildcard(require("@babel/traverse"));
+var _traverse = _interopRequireDefault(require("@babel/traverse"));
+function _interopRequireDefault(obj) {
+    return obj && obj.__esModule ? obj : {
+        default: obj
+    };
+}
 function _interopRequireWildcard(obj) {
     if (obj && obj.__esModule) {
         return obj;
@@ -56,15 +61,23 @@ module.exports = (function() {
         onInit(server, project) {
             console.log('initialized');
             this.initBrowser();
-            project.addWatcher((uri)=>{
+            project.addWatcher((uri, changeType)=>{
                 console.log('uri', uri);
                 if (!this.browser) {
                     console.log('no-browser');
                     return;
                 }
-                this.getLinting(_vscodeUri.URI.parse(uri).fsPath);
+                if (changeType === 2) {
+                    var ref;
+                    const filePath = _vscodeUri.URI.parse(uri).fsPath;
+                    if (((ref = project.matchPathToType(filePath)) === null || ref === void 0 ? void 0 : ref.kind) === 'test') {
+                        this.getLinting(filePath);
+                    }
+                }
             });
             return ()=>{
+                this.pagePool.forEach((page)=>page.close()
+                );
                 this.browser.close();
             };
         }
@@ -72,7 +85,7 @@ module.exports = (function() {
             console.log('getLinting', filePath);
             const info = this.extractTestFileInformation(filePath);
             console.log(info);
-            const results = Promise.all(info.tests.map((el)=>{
+            const results = await Promise.all(info.tests.map((el)=>{
                 return this.getTestResults(info.moduleName, el);
             }));
             console.log('results', results);
@@ -82,17 +95,22 @@ module.exports = (function() {
             const ast = _emberMetaExplorer.parseScriptFile(fs.readFileSync(filePath, "utf8"));
             let moduleName = "";
             let foundTests = [];
-            traverse(ast, {
-                ExpressionStatement (node) {
-                    if (node.expression.type === "CallExpression") {
-                        if (node.expression.callee.name === "module") {
-                            moduleName = node.expression.arguments[0].value;
-                        } else if (node.expression.callee.name === "test") {
-                            foundTests.push(node.expression.arguments[0].value);
+            try {
+                _traverse.default(ast, {
+                    ExpressionStatement (nodePath) {
+                        const node = nodePath.node;
+                        if (node.expression.type === "CallExpression") {
+                            if (node.expression.callee.name === "module") {
+                                moduleName = node.expression.arguments[0].value;
+                            } else if (node.expression.callee.name === "test") {
+                                foundTests.push(node.expression.arguments[0].value);
+                            }
                         }
                     }
-                }
-            });
+                });
+            } catch (e) {
+                console.log(e);
+            }
             return {
                 moduleName,
                 tests: foundTests
@@ -100,7 +118,7 @@ module.exports = (function() {
         }
         async getTestResults(moduleName, testName) {
             console.log('getTestResults', moduleName, testName);
-            const page = await this.context.newPage();
+            const page = this.pagePool.shift() || await this.context.newPage();
             const testId = generateHash(moduleName, testName);
             const url = `http://localhost:4300/tests?testId=${testId}`;
             await page.goto(url, {
@@ -119,8 +137,11 @@ module.exports = (function() {
             try {
                 return results;
             } finally{
-                page.close();
+                this.pagePool.push(page);
             }
+        }
+        constructor(){
+            this.pagePool = [];
         }
     }
     return ElsAddonQunitTestRunner;
