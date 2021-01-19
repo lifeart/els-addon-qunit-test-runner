@@ -194,9 +194,15 @@ module.exports = class ElsAddonQunitTestRunner implements AddonAPI {
         result: isPassed,
         message: isPassed ? [
           'Test Passed:',
-          ...successMessage].join('\n') : [
+          '---------------',
+          'Asserts:',
+          '---------------',
+          ...successMessage.map((el)=>`* ${el}`)
+        ].join('\n') : [
             'Test Failed:',
-            ...failMessage
+            '---------------',
+            'Failed Asserts:',
+            ...failMessage.map((el)=>`* ${el}`)
           ].join('\n')
       }))
     });

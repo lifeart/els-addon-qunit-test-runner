@@ -155,10 +155,17 @@ module.exports = (function() {
                     result: isPassed,
                     message: isPassed ? [
                         'Test Passed:',
-                        ...successMessage
+                        '---------------',
+                        'Asserts:',
+                        '---------------',
+                        ...successMessage.map((el)=>`* ${el}`
+                        )
                     ].join('\n') : [
                         'Test Failed:',
-                        ...failMessage
+                        '---------------',
+                        'Failed Asserts:',
+                        ...failMessage.map((el)=>`* ${el}`
+                        )
                     ].join('\n')
                 }));
             });
