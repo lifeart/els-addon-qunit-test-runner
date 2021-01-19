@@ -153,7 +153,13 @@ module.exports = (function() {
                 const isPassed = testResult.failed === 0;
                 diagnostics.push(toDiagnostic(test.nameLoc, {
                     result: isPassed,
-                    message: isPassed ? successMessage.join('\n') : failMessage.join('\n')
+                    message: isPassed ? [
+                        'Test Passed:',
+                        ...successMessage
+                    ].join('\n') : [
+                        'Test Failed:',
+                        ...failMessage
+                    ].join('\n')
                 }));
             });
             return diagnostics;
