@@ -30,12 +30,16 @@ interface ASTLocation {
   end: { line: number, column: number };
 }
 
-function toDiagnostic(location: ASTLocation, data: QUnitAssertion): Diagnostic {
+function createRange(location: ASTLocation) {
   const start = Position.create(location.start.line - 1, location.start.column);
   const end = Position.create(location.end.line - 1, location.end.column);
+  return Range.create(start, end);
+}
+
+function toDiagnostic(location: ASTLocation, data: QUnitAssertion): Diagnostic {
   return {
-    severity: data.result ? DiagnosticSeverity.Hint : DiagnosticSeverity.Error,
-    range: Range.create(start, end),
+    severity: data.result ? DiagnosticSeverity.Warning : DiagnosticSeverity.Error,
+    range: createRange(location),
     message: data.message,
     code: 'qunit-test',
     source: 'qunit',
@@ -105,26 +109,22 @@ module.exports = class ElsAddonQunitTestRunner implements AddonAPI {
         this.matchFunctions.forEach((fn) => fn(uri));
       }
     });
-
+    let lintedVersions = [];
     const lintFn: any = async (document : TextDocument) => {
       
-      const asyncLint = async () => {
-        const filePath = URI.parse(document.uri).fsPath;
-        const version = document.version;
-        if (project.matchPathToType(filePath)?.kind === 'test') {
-          console.time(`${filePath}:${version}:testing`);
-          await Promise.all([this.initBrowser(), this.waitForAssets()]);
-          const results = await this.getLinting(document.getText());
-          this.server.connection.sendDiagnostics({
-            version: document.version,
-            diagnostics: results,
-            uri: document.uri
-          });
-          console.timeEnd(`${filePath}:${version}:testing`);
-        }
+      const filePath = URI.parse(document.uri).fsPath;
+      const version = document.version;
+      const testRunId = `${filePath}:${version}`;
+      if (lintedVersions.includes(testRunId)) {
+        return;
+      }
+      if (project.matchPathToType(filePath)?.kind === 'test') {
+        lintedVersions.push(testRunId);
+        const info = this.extractTestFileInformation(document.getText());
+        this.asyncLint(info, document, testRunId);
+        return this.createPreDiagnostics(info);
       }
 
-      asyncLint();
     }
     project.addLinter(lintFn);
 
@@ -134,6 +134,17 @@ module.exports = class ElsAddonQunitTestRunner implements AddonAPI {
         this.browser.close();
       }
     };
+  }
+  async asyncLint(info: ITestInfo, document: TextDocument, testRunId: string) {
+    await Promise.all([this.initBrowser(), this.waitForAssets()]);
+    console.time(`${testRunId}:testing`);
+    const results = await this.getLinting(info);
+    this.server.connection.sendDiagnostics({
+      version: document.version,
+      diagnostics: results,
+      uri: document.uri
+    });
+    console.timeEnd(`${testRunId}:testing`);
   }
   waitForAssets(timeout = 60000) {
     let timeoutUid = null;
@@ -187,8 +198,21 @@ module.exports = class ElsAddonQunitTestRunner implements AddonAPI {
 
     return diagnostics;
   }
-  async getLinting(text) {
-    const info = this.extractTestFileInformation(text);
+  createPreDiagnostics(info: ITestInfo) {
+    const diagnostics: Diagnostic[] = [];
+    info.tests.forEach((test) => {
+      diagnostics.push({
+        severity: DiagnosticSeverity.Information,
+        range: createRange(test.nameLoc),
+        message: `Test: "${test.name}" in progress, ${test.asserts.length} asserts...`,
+        code: 'qunit-test',
+        source: 'qunit',
+      });
+    });
+    return diagnostics;
+  }
+
+  async getLinting(info: ITestInfo) {
     const results = await Promise.all(
       info.tests.map((el) => {
         return this.getTestResults(info.moduleName, el.name);

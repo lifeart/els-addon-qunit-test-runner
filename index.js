@@ -9,12 +9,15 @@ function _interopRequireDefault(obj) {
         default: obj
     };
 }
-function toDiagnostic(location, data) {
+function createRange(location) {
     const start = _node.Position.create(location.start.line - 1, location.start.column);
     const end = _node.Position.create(location.end.line - 1, location.end.column);
+    return _node.Range.create(start, end);
+}
+function toDiagnostic(location, data) {
     return {
-        severity: data.result ? _node.DiagnosticSeverity.Hint : _node.DiagnosticSeverity.Error,
-        range: _node.Range.create(start, end),
+        severity: data.result ? _node.DiagnosticSeverity.Warning : _node.DiagnosticSeverity.Error,
+        range: createRange(location),
         message: data.message,
         code: 'qunit-test',
         source: 'qunit'
@@ -60,27 +63,21 @@ module.exports = (function() {
                     );
                 }
             });
+            let lintedVersions = [];
             const lintFn = async (document)=>{
-                const asyncLint = async ()=>{
-                    var ref;
-                    const filePath = _vscodeUri.URI.parse(document.uri).fsPath;
-                    const version = document.version;
-                    if (((ref = project.matchPathToType(filePath)) === null || ref === void 0 ? void 0 : ref.kind) === 'test') {
-                        console.time(`${filePath}:${version}:testing`);
-                        await Promise.all([
-                            this.initBrowser(),
-                            this.waitForAssets()
-                        ]);
-                        const results = await this.getLinting(document.getText());
-                        this.server.connection.sendDiagnostics({
-                            version: document.version,
-                            diagnostics: results,
-                            uri: document.uri
-                        });
-                        console.timeEnd(`${filePath}:${version}:testing`);
-                    }
-                };
-                asyncLint();
+                var ref;
+                const filePath = _vscodeUri.URI.parse(document.uri).fsPath;
+                const version = document.version;
+                const testRunId = `${filePath}:${version}`;
+                if (lintedVersions.includes(testRunId)) {
+                    return;
+                }
+                if (((ref = project.matchPathToType(filePath)) === null || ref === void 0 ? void 0 : ref.kind) === 'test') {
+                    lintedVersions.push(testRunId);
+                    const info = this.extractTestFileInformation(document.getText());
+                    this.asyncLint(info, document, testRunId);
+                    return this.createPreDiagnostics(info);
+                }
             };
             project.addLinter(lintFn);
             return ()=>{
@@ -90,6 +87,20 @@ module.exports = (function() {
                     this.browser.close();
                 }
             };
+        }
+        async asyncLint(info, document, testRunId) {
+            await Promise.all([
+                this.initBrowser(),
+                this.waitForAssets()
+            ]);
+            console.time(`${testRunId}:testing`);
+            const results = await this.getLinting(info);
+            this.server.connection.sendDiagnostics({
+                version: document.version,
+                diagnostics: results,
+                uri: document.uri
+            });
+            console.timeEnd(`${testRunId}:testing`);
         }
         waitForAssets(timeout = 60000) {
             let timeoutUid = null;
@@ -147,8 +158,20 @@ module.exports = (function() {
             });
             return diagnostics;
         }
-        async getLinting(text) {
-            const info = this.extractTestFileInformation(text);
+        createPreDiagnostics(info) {
+            const diagnostics = [];
+            info.tests.forEach((test)=>{
+                diagnostics.push({
+                    severity: _node.DiagnosticSeverity.Information,
+                    range: createRange(test.nameLoc),
+                    message: `Test: "${test.name}" in progress, ${test.asserts.length} asserts...`,
+                    code: 'qunit-test',
+                    source: 'qunit'
+                });
+            });
+            return diagnostics;
+        }
+        async getLinting(info) {
             const results = await Promise.all(info.tests.map((el)=>{
                 return this.getTestResults(info.moduleName, el.name);
             }));
