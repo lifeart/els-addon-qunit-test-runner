@@ -104,11 +104,12 @@ module.exports = class ElsAddonQunitTestRunner implements AddonAPI {
   }
   onInit(server: Server, project: Project) {
     this.server = server;
-    project.addWatcher((uri, changeType) => {
+    let watcherFn = (uri, changeType) => {
       if (changeType === 2) {
         this.matchFunctions.forEach((fn) => fn(uri));
       }
-    });
+    };
+    project.addWatcher(watcherFn);
     let lintedVersions = [];
     const lintFn: any = async (document : TextDocument) => {
       
@@ -129,6 +130,8 @@ module.exports = class ElsAddonQunitTestRunner implements AddonAPI {
     project.addLinter(lintFn);
 
     return () => {
+      project.linters = project.linters.filter((linter) => linter !== lintFn);
+      project.watchers = project.watchers.filter((watcher) => watcher !== watcherFn);
       this.pagePool.forEach((page) => page.close());
       if (this.browser) {
         this.browser.close();

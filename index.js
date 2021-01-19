@@ -57,12 +57,13 @@ module.exports = (function() {
         }
         onInit(server, project) {
             this.server = server;
-            project.addWatcher((uri, changeType)=>{
+            let watcherFn = (uri, changeType)=>{
                 if (changeType === 2) {
                     this.matchFunctions.forEach((fn)=>fn(uri)
                     );
                 }
-            });
+            };
+            project.addWatcher(watcherFn);
             let lintedVersions = [];
             const lintFn = async (document)=>{
                 var ref;
@@ -81,6 +82,10 @@ module.exports = (function() {
             };
             project.addLinter(lintFn);
             return ()=>{
+                project.linters = project.linters.filter((linter)=>linter !== lintFn
+                );
+                project.watchers = project.watchers.filter((watcher)=>watcher !== watcherFn
+                );
                 this.pagePool.forEach((page)=>page.close()
                 );
                 if (this.browser) {
