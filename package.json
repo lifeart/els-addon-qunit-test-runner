@@ -19,11 +19,7 @@
   },
   "ember-language-server": {
     "entry": "./index",
-    "debug": false,
-    "capabilities": {
-      "completionProvider": true,
-      "definitionProvider": true
-    }
+    "debug": false
   },
   "devDependencies": {
     "@lifeart/ember-language-server": "^1.0.1",
