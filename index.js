@@ -54,33 +54,30 @@ module.exports = (function() {
         }
         onInit(server, project) {
             this.server = server;
-            // project.addWatcher((uri, changeType) => {
-            //   console.log('uri', uri);
-            //   if (!this.browser) {
-            //     console.log('no-browser');
-            //     return;
-            //   }
-            //   if (changeType === 2) {
-            //     const filePath = URI.parse(uri).fsPath;
-            //     if (project.matchPathToType(filePath)?.kind === 'test') {
-            //       this.getLinting(filePath);
-            //     }
-            //   }
-            // });
+            project.addWatcher((uri, changeType)=>{
+                if (changeType === 2) {
+                    this.matchFunctions.forEach((fn)=>fn(uri)
+                    );
+                }
+            });
             const lintFn = async (document)=>{
                 const asyncLint = async ()=>{
                     var ref;
-                    await this.initBrowser();
                     const filePath = _vscodeUri.URI.parse(document.uri).fsPath;
+                    const version = document.version;
                     if (((ref = project.matchPathToType(filePath)) === null || ref === void 0 ? void 0 : ref.kind) === 'test') {
-                        console.log('can lint');
+                        console.time(`${filePath}:${version}:testing`);
+                        await Promise.all([
+                            this.initBrowser(),
+                            this.waitForAssets()
+                        ]);
                         const results = await this.getLinting(document.getText());
-                        console.log('results', results);
                         this.server.connection.sendDiagnostics({
                             version: document.version,
                             diagnostics: results,
                             uri: document.uri
                         });
+                        console.timeEnd(`${filePath}:${version}:testing`);
                     }
                 };
                 asyncLint();
@@ -94,15 +91,59 @@ module.exports = (function() {
                 }
             };
         }
+        waitForAssets(timeout = 60000) {
+            let timeoutUid = null;
+            let resolve = null;
+            let reject = null;
+            let deleteFunction = null;
+            let item = new Promise((res, rej)=>{
+                resolve = res;
+                reject = (reason)=>{
+                    deleteFunction();
+                    rej(reason);
+                };
+            });
+            timeoutUid = setTimeout(()=>{
+                reject("timeout");
+            }, timeout);
+            let fn = (uri)=>{
+                if (uri.includes('dist') && uri.includes('assets')) {
+                    deleteFunction();
+                    setTimeout(resolve);
+                }
+            };
+            this.matchFunctions.push(fn);
+            deleteFunction = ()=>{
+                clearTimeout(timeoutUid);
+                this.matchFunctions = this.matchFunctions.filter((f)=>f !== fn
+                );
+            };
+            return item;
+        }
         createDiagnostics(testsInfo, testsResults) {
             const diagnostics = [];
-            testsResults.forEach((result)=>{
-                const relatedTest = testsInfo.tests.find((el)=>el.name === result.name
+            // testsResults.forEach((result) => {
+            //   const relatedTest = testsInfo.tests.find((el) => el.name === result.name);
+            //   const relatedAsserts = relatedTest.asserts;
+            //   result.assertions.forEach((assert, index) => {
+            //     diagnostics.push(toDiagnostic(relatedAsserts[index], assert));
+            //   });
+            // });
+            const allRelatedResults = testsResults.filter((el)=>el.module === testsInfo.moduleName
+            );
+            testsInfo.tests.forEach((test)=>{
+                const testResult = allRelatedResults.find((result)=>result.name === test.name
                 );
-                const relatedAsserts = relatedTest.asserts;
-                result.assertions.forEach((assert, index)=>{
-                    diagnostics.push(toDiagnostic(relatedAsserts[index], assert));
-                });
+                const failMessage = testResult.assertions.filter((assert)=>assert.result === false
+                ).map((el)=>el.message
+                );
+                const successMessage = testResult.assertions.map((el)=>el.message
+                );
+                const isPassed = testResult.failed === 0;
+                diagnostics.push(toDiagnostic(test.nameLoc, {
+                    result: isPassed,
+                    message: isPassed ? successMessage.join('\n') : failMessage.join('\n')
+                }));
             });
             return diagnostics;
         }
@@ -117,6 +158,7 @@ module.exports = (function() {
         extractTestFileInformation(text) {
             const ast = _emberMetaExplorer.parseScriptFile(text);
             let moduleName = "";
+            let moduleLoc;
             let foundTests = [];
             try {
                 _traverse.default(ast, {
@@ -125,9 +167,11 @@ module.exports = (function() {
                         if (node.expression.type === "CallExpression") {
                             if (node.expression.callee.name === "module") {
                                 moduleName = node.expression.arguments[0].value;
+                                moduleLoc = node.expression.arguments[0].loc;
                             } else if (node.expression.callee.name === "test") {
                                 foundTests.push({
                                     name: node.expression.arguments[0].value,
+                                    nameLoc: node.expression.arguments[0].loc,
                                     asserts: []
                                 });
                             }
@@ -144,6 +188,7 @@ module.exports = (function() {
             }
             return {
                 moduleName,
+                moduleLoc,
                 tests: foundTests
             };
         }
@@ -151,7 +196,6 @@ module.exports = (function() {
             const page = this.pagePool.shift() || await this.context.newPage();
             const testId = generateHash(moduleName, testName);
             const url = `http://localhost:4300/tests?testId=${testId}`;
-            console.time(testId);
             await page.goto(url, {
                 waitUntil: "load"
             });
@@ -165,7 +209,6 @@ module.exports = (function() {
             });
             const result = await page.evaluate(()=>window.__TEST_RESULTS
             );
-            console.timeEnd(testId);
             try {
                 return result;
             } finally{
@@ -174,6 +217,7 @@ module.exports = (function() {
         }
         constructor(){
             this.pagePool = [];
+            this.matchFunctions = [];
             this.linterResults = {
             };
         }

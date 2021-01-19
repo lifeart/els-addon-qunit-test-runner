@@ -1,7 +1,7 @@
 /* eslint-disable no-undef */
 /* globals QUnit */
 import { Project, Server, AddonAPI } from "@lifeart/ember-language-server";
-import { Diagnostic, DiagnosticSeverity, Range, Position, PublishDiagnosticsParams } from 'vscode-languageserver/node';
+import { Diagnostic, DiagnosticSeverity, Range, Position } from 'vscode-languageserver/node';
 import { chromium, ChromiumBrowser, ChromiumBrowserContext, Page } from "playwright";
 import { TextDocument } from 'vscode-languageserver-textdocument';
 import { URI } from "vscode-uri";
@@ -43,12 +43,14 @@ function toDiagnostic(location: ASTLocation, data: QUnitAssertion): Diagnostic {
 }
 
 interface ITest {
-  name: string,
+  name: string;
+  nameLoc: ASTLocation;
   asserts: ASTLocation[]
 }
 
 interface ITestInfo {
   moduleName: string;
+  moduleLoc: ASTLocation;
   tests: ITest[]
 }
 
@@ -70,13 +72,13 @@ function generateHash(module, testName) {
 
   return hex.slice(-8);
 }
-
 module.exports = class ElsAddonQunitTestRunner implements AddonAPI {
   server!: Server;
   browser!: ChromiumBrowser;
   context!: ChromiumBrowserContext;
   pagePool: Page[] = [];
   initPromise: any;
+  matchFunctions: any[] = [];
   linterResults: {
     [key: string]: Diagnostic[]
   } = {};
@@ -98,34 +100,27 @@ module.exports = class ElsAddonQunitTestRunner implements AddonAPI {
   }
   onInit(server: Server, project: Project) {
     this.server = server;
-    // project.addWatcher((uri, changeType) => {
-    //   console.log('uri', uri);
-    //   if (!this.browser) {
-    //     console.log('no-browser');
-    //     return;
-    //   }
-    //   if (changeType === 2) {
-    //     const filePath = URI.parse(uri).fsPath;
-    //     if (project.matchPathToType(filePath)?.kind === 'test') {
-    //       this.getLinting(filePath);
-    //     }
-    //   }
-    // });
+    project.addWatcher((uri, changeType) => {
+      if (changeType === 2) {
+        this.matchFunctions.forEach((fn) => fn(uri));
+      }
+    });
 
     const lintFn: any = async (document : TextDocument) => {
       
       const asyncLint = async () => {
-        await this.initBrowser();
         const filePath = URI.parse(document.uri).fsPath;
+        const version = document.version;
         if (project.matchPathToType(filePath)?.kind === 'test') {
-          console.log('can lint');
+          console.time(`${filePath}:${version}:testing`);
+          await Promise.all([this.initBrowser(), this.waitForAssets()]);
           const results = await this.getLinting(document.getText());
-          console.log('results', results);
           this.server.connection.sendDiagnostics({
             version: document.version,
             diagnostics: results,
             uri: document.uri
-          })
+          });
+          console.timeEnd(`${filePath}:${version}:testing`);
         }
       }
 
@@ -140,15 +135,56 @@ module.exports = class ElsAddonQunitTestRunner implements AddonAPI {
       }
     };
   }
+  waitForAssets(timeout = 60000) {
+    let timeoutUid = null;
+    let resolve = null;
+    let reject = null;
+    let deleteFunction = null;
+    let item = new Promise((res, rej) => {
+      resolve = res;
+      reject = (reason) => {
+        deleteFunction();
+        rej(reason);
+      };
+    });
+    timeoutUid = setTimeout(() => {
+      reject("timeout");
+    }, timeout);
+    let fn = (uri) => {
+      if (uri.includes('dist') && uri.includes('assets')) {
+        deleteFunction();
+        setTimeout(resolve);
+      }
+    };
+    this.matchFunctions.push(fn);
+    deleteFunction = () => {
+      clearTimeout(timeoutUid);
+      this.matchFunctions = this.matchFunctions.filter((f) => f !== fn);
+    };
+    return item;
+  }
   createDiagnostics(testsInfo: ITestInfo, testsResults: QUnitTestResult[]) {
     const diagnostics: Diagnostic[] = [];
-    testsResults.forEach((result) => {
-      const relatedTest = testsInfo.tests.find((el) => el.name === result.name);
-      const relatedAsserts = relatedTest.asserts;
-      result.assertions.forEach((assert, index) => {
-        diagnostics.push(toDiagnostic(relatedAsserts[index], assert));
-      });
+    // testsResults.forEach((result) => {
+    //   const relatedTest = testsInfo.tests.find((el) => el.name === result.name);
+    //   const relatedAsserts = relatedTest.asserts;
+    //   result.assertions.forEach((assert, index) => {
+    //     diagnostics.push(toDiagnostic(relatedAsserts[index], assert));
+    //   });
+    // });
+    const allRelatedResults = testsResults.filter((el) => el.module === testsInfo.moduleName);
+
+    testsInfo.tests.forEach((test) => {
+      const testResult = allRelatedResults.find((result) => result.name === test.name);
+      const failMessage = testResult.assertions.filter((assert)=> assert.result === false).map((el)=> el.message);
+      const successMessage = testResult.assertions.map((el) => el.message);
+      const isPassed = testResult.failed === 0;
+      diagnostics.push(toDiagnostic(test.nameLoc, {
+        result: isPassed,
+        message: isPassed ? successMessage.join('\n') : failMessage.join('\n')
+      }))
     });
+
     return diagnostics;
   }
   async getLinting(text) {
@@ -164,6 +200,7 @@ module.exports = class ElsAddonQunitTestRunner implements AddonAPI {
   extractTestFileInformation(text): ITestInfo {
     const ast = parseScriptFile(text);
     let moduleName = "";
+    let moduleLoc!: ASTLocation;
     let foundTests = [];
     try {
       traverse(ast, {
@@ -172,9 +209,11 @@ module.exports = class ElsAddonQunitTestRunner implements AddonAPI {
           if (node.expression.type === "CallExpression") {
             if (node.expression.callee.name === "module") {
               moduleName = node.expression.arguments[0].value;
+              moduleLoc = node.expression.arguments[0].loc;
             } else if (node.expression.callee.name === "test") {
               foundTests.push({
                 name: node.expression.arguments[0].value,
+                nameLoc: node.expression.arguments[0].loc,
                 asserts: []
               });
             }
@@ -191,6 +230,7 @@ module.exports = class ElsAddonQunitTestRunner implements AddonAPI {
     }
     return {
       moduleName,
+      moduleLoc,
       tests: foundTests,
     };
   }
@@ -198,7 +238,6 @@ module.exports = class ElsAddonQunitTestRunner implements AddonAPI {
     const page = this.pagePool.shift() || await this.context.newPage();
     const testId = generateHash(moduleName, testName);
     const url = `http://localhost:4300/tests?testId=${testId}`;
-    console.time(testId);
     await page.goto(url, {
       waitUntil: "load",
     });
@@ -211,7 +250,6 @@ module.exports = class ElsAddonQunitTestRunner implements AddonAPI {
       timeout: 30000,
     });
     const result: QUnitTestResult = await page.evaluate(() => window.__TEST_RESULTS);
-    console.timeEnd(testId);
     try {
       return result;
     } finally {
